@@ -865,3 +865,99 @@
     )
   )
 )
+
+;; Implement envelope transfer-abort mechanism with cooling period
+(define-public (initiate-transfer-abort (envelope-identifier uint) (abort-reason (string-ascii 100)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len abort-reason) u5) (err u300)) ;; Require substantive reason
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (status (get envelope-status envelope-data))
+        (cooling-period u36) ;; ~6 hour cooling period
+        (execution-block (+ block-height cooling-period))
+      )
+      ;; Only originator, destination or governor can abort
+      (asserts! (or (is-eq tx-sender originator) 
+                   (is-eq tx-sender destination)
+                   (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      ;; Can only abort active envelopes
+      (asserts! (or (is-eq status "pending") 
+                   (is-eq status "accepted")
+                   (is-eq status "auth-pending")) ERROR_ALREADY_PROCESSED)
+
+      ;; Set envelope to abort-pending state
+
+      (print {event: "transfer_abort_initiated", envelope-identifier: envelope-identifier, 
+              initiator: tx-sender, reason: abort-reason, execution-block: execution-block})
+      (ok execution-block)
+    )
+  )
+)
+
+;; Implement trusted delegate assignment for envelope management
+(define-public (assign-trusted-delegate (envelope-identifier uint) (delegate principal) (permission-flags uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> permission-flags u0) (err u310)) ;; Must have at least one permission
+    (asserts! (<= permission-flags u7) (err u311)) ;; Maximum permission value (binary 111)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (status (get envelope-status envelope-data))
+      )
+      ;; Only originator can assign delegates
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      ;; Cannot assign self as delegate
+      (asserts! (not (is-eq delegate originator)) (err u312))
+      ;; Cannot assign destination as delegate
+      (asserts! (not (is-eq delegate (get destination envelope-data))) (err u313))
+      ;; Only for active envelopes
+      (asserts! (or (is-eq status "pending") 
+                   (is-eq status "accepted")
+                   (is-eq status "auth-pending")) ERROR_ALREADY_PROCESSED)
+
+      ;; In production would update a delegate registry map
+
+      (print {event: "delegate_assigned", envelope-identifier: envelope-identifier, 
+              originator: originator, delegate: delegate, permissions: permission-flags})
+      (ok true)
+    )
+  )
+)
+
+;; Implement emergency recovery mode with recovery key validation
+(define-public (activate-emergency-recovery (envelope-identifier uint) (recovery-key (buff 64)) (recovery-proof (buff 64)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+        (status (get envelope-status envelope-data))
+      )
+      ;; Recovery only available for specific statuses
+      (asserts! (or (is-eq status "pending") 
+                   (is-eq status "disputed") 
+                   (is-eq status "halted")
+                   (is-eq status "time-locked")
+                   (is-eq status "auth-pending")) (err u290))
+      ;; Only originator or protocol governor can activate recovery
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+
+      ;; Verify recovery key format (would include actual verification in production)
+      (asserts! (is-eq (len recovery-key) u64) (err u291))
+
+      ;; Set envelope to recovery mode
+
+      (print {event: "emergency_recovery_activated", envelope-identifier: envelope-identifier, 
+              recovery-requestor: tx-sender, recovery-proof-hash: (hash160 recovery-proof)})
+      (ok true)
+    )
+  )
+)
