@@ -353,3 +353,85 @@
     )
   )
 )
+
+;; Create phased envelope
+(define-public (create-phased-envelope (destination principal) (token-identifier uint) (quantity uint) (stages uint))
+  (let 
+    (
+      (new-identifier (+ (var-get current-envelope-identifier) u1))
+      (termination-time (+ block-height ENVELOPE_DURATION_BLOCKS))
+      (stage-quantity (/ quantity stages))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> stages u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= stages u5) ERROR_INVALID_QUANTITY) ;; Max 5 stages
+    (asserts! (valid-destination? destination) ERROR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* stage-quantity stages) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set current-envelope-identifier new-identifier)
+
+          (print {event: "phased_envelope_created", envelope-identifier: new-identifier, originator: tx-sender, destination: destination, 
+                  token-identifier: token-identifier, quantity: quantity, stages: stages, stage-quantity: stage-quantity})
+          (ok new-identifier)
+        )
+      error ERROR_MOVEMENT_FAILED
+    )
+  )
+)
+
+;; Cryptographic validation
+(define-public (validate-cryptographically (envelope-identifier uint) (message-digest (buff 32)) (signature (buff 65)) (signatory principal))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (verification-result (unwrap! (secp256k1-recover? message-digest signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq signatory originator) (is-eq signatory destination)) (err u151))
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Verify signature matches expected signatory
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) signatory) (err u153))
+
+      (print {event: "cryptographic_validation_complete", envelope-identifier: envelope-identifier, validator: tx-sender, signatory: signatory})
+      (ok true)
+    )
+  )
+)
+
+;; Register envelope metadata
+(define-public (register-envelope-metadata (envelope-identifier uint) (metadata-category (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+      )
+      ;; Only authorized parties can add metadata
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get envelope-status envelope-data) "delivered")) (err u160))
+      (asserts! (not (is-eq (get envelope-status envelope-data) "reverted")) (err u161))
+      (asserts! (not (is-eq (get envelope-status envelope-data) "expired")) (err u162))
+
+      ;; Valid metadata categories
+      (asserts! (or (is-eq metadata-category "token-specifications") 
+                   (is-eq metadata-category "delivery-confirmation")
+                   (is-eq metadata-category "verification-record")
+                   (is-eq metadata-category "originator-preferences")) (err u163))
+
+      (print {event: "metadata_registered", envelope-identifier: envelope-identifier, metadata-category: metadata-category, 
+              metadata-digest: metadata-digest, registrant: tx-sender})
+      (ok true)
+    )
+  )
+)
+
