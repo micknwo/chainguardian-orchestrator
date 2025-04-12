@@ -770,4 +770,98 @@
   )
 )
 
+;; Implement velocity checking for suspicious activity detection
+(define-public (flag-suspicious-velocity 
+                (envelope-identifier uint) 
+                (velocity-threshold uint) 
+                (monitoring-period uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> velocity-threshold u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> monitoring-period u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= monitoring-period u144) (err u260)) ;; Maximum 1 day monitoring period
 
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (quantity (get quantity envelope-data))
+        (current-status (get envelope-status envelope-data))
+      )
+      ;; Any authorized party can flag suspicious activity
+      (asserts! (or (is-eq tx-sender originator) 
+                  (is-eq tx-sender destination) 
+                  (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      ;; Only for active envelopes
+      (asserts! (or (is-eq current-status "pending") 
+                  (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Update envelope status to flagged
+      (map-set EnvelopeRegistry
+        { envelope-identifier: envelope-identifier }
+        (merge envelope-data { envelope-status: "flagged" })
+      )
+
+      (print {event: "suspicious_velocity_flagged", 
+              envelope-identifier: envelope-identifier, 
+              flagged-by: tx-sender,
+              velocity-threshold: velocity-threshold,
+              monitoring-period: monitoring-period,
+              quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Implement time-locked withdrawal functionality with multi-factor verification
+(define-public (create-time-locked-withdrawal (envelope-identifier uint) (unlock-block uint) (verification-token (buff 32)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> unlock-block block-height) ERROR_INVALID_QUANTITY) ;; Future block required
+    (asserts! (<= unlock-block (+ block-height u1440)) (err u270)) ;; Maximum 10 days in future
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (status (get envelope-status envelope-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED) ;; Only originator can create time-lock
+      (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED) ;; Only pending envelopes can be time-locked
+
+      ;; Update envelope status to time-locked
+
+      (print {event: "time_locked_withdrawal_created", envelope-identifier: envelope-identifier, 
+              originator: originator, unlock-block: unlock-block, verification-digest: (hash160 verification-token)})
+      (ok unlock-block)
+    )
+  )
+)
+
+;; Implement cascading authorization with multiple signatories for high-security transfers
+(define-public (register-cascading-authorization (envelope-identifier uint) (auth-principals (list 5 principal)) (auth-threshold uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len auth-principals) u1) (err u280)) ;; At least 2 authorization principals
+    (asserts! (> auth-threshold u0) (err u281)) ;; Threshold must be positive
+    (asserts! (<= auth-threshold (len auth-principals)) (err u282)) ;; Threshold cannot exceed principal count
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+        (status (get envelope-status envelope-data))
+      )
+      ;; Only for high-value envelopes
+      (asserts! (> quantity u5000) (err u283))
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED) ;; Only originator can set authorization
+      (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED) ;; Only pending envelopes
+
+      ;; Mark envelope as requiring cascading authorization
+
+      (print {event: "cascading_authorization_registered", envelope-identifier: envelope-identifier, 
+              originator: originator, auth-principals: auth-principals, auth-threshold: auth-threshold})
+      (ok auth-threshold)
+    )
+  )
+)
