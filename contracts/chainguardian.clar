@@ -435,3 +435,82 @@
   )
 )
 
+;; Set delayed recovery mechanism
+(define-public (configure-delayed-recovery (envelope-identifier uint) (delay-duration uint) (recovery-principal principal))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> delay-duration u72) ERROR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-duration u1440) ERROR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (activation-block (+ block-height delay-duration))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq recovery-principal originator)) (err u180)) ;; Recovery principal must differ from originator
+      (asserts! (not (is-eq recovery-principal (get destination envelope-data))) (err u181)) ;; Recovery principal must differ from destination
+      (print {event: "delayed_recovery_configured", envelope-identifier: envelope-identifier, originator: originator, 
+              recovery-principal: recovery-principal, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Enable enhanced security
+(define-public (enable-enhanced-security (envelope-identifier uint) (security-hash (buff 32)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+      )
+      ;; Only for envelopes above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {event: "enhanced_security_enabled", envelope-identifier: envelope-identifier, originator: originator, security-digest: (hash160 security-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Process delayed retrieval
+(define-public (process-delayed-retrieval (envelope-identifier uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+        (status (get envelope-status envelope-data))
+        (delay-duration u24) ;; 24 blocks delay (~4 hours)
+      )
+      ;; Only originator or admin can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      ;; Only from retrieval-pending status
+      (asserts! (is-eq status "retrieval-pending") (err u301))
+      ;; Delay must have elapsed
+      (asserts! (>= block-height (+ (get creation-block envelope-data) delay-duration)) (err u302))
+
+      ;; Process retrieval
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) ERROR_MOVEMENT_FAILED)
+
+      ;; Update envelope status
+      (map-set EnvelopeRegistry
+        { envelope-identifier: envelope-identifier }
+        (merge envelope-data { envelope-status: "retrieved", quantity: u0 })
+      )
+
+      (print {event: "delayed_retrieval_processed", envelope-identifier: envelope-identifier, 
+              originator: originator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+
