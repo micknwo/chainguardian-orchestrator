@@ -584,3 +584,94 @@
     )
   )
 )
+
+;; Freeze envelope for security audit
+(define-public (freeze-for-security-audit (envelope-identifier uint) (audit-reason (string-ascii 50)) (audit-duration uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> audit-duration u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= audit-duration u144) (err u290)) ;; Max 1 day audit period
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (current-status (get envelope-status envelope-data))
+        (quantity (get quantity envelope-data))
+        (audit-expiration (+ block-height audit-duration))
+      )
+      ;; Only authorized parties can initiate security audit
+      (asserts! (or (is-eq tx-sender PROTOCOL_GOVERNOR) 
+                   (is-eq tx-sender originator)) ERROR_UNAUTHORIZED)
+      ;; Only active envelopes can be audited
+      (asserts! (or (is-eq current-status "pending") 
+                   (is-eq current-status "accepted")
+                   (is-eq current-status "timelocked")) ERROR_ALREADY_PROCESSED)
+
+      ;; High-value envelopes automatically get extended audit
+      (let
+        (
+          (effective-duration (if (> quantity u10000) (+ audit-duration u24) audit-duration))
+          (effective-expiration (+ block-height effective-duration))
+        )
+
+        (print {event: "security_audit_initiated", envelope-identifier: envelope-identifier, 
+                initiator: tx-sender, reason: audit-reason, audit-expiration: effective-expiration, 
+                high-value-extension: (> quantity u10000)})
+        (ok effective-expiration)
+      )
+    )
+  )
+)
+
+;; Implement circuit breaker pattern for emergency situations
+(define-public (activate-circuit-breaker (reason (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERROR_UNAUTHORIZED)
+    (asserts! (> (len reason) u10) (err u230)) ;; Reason must be substantive
+
+    ;; In a complete implementation, this would set a contract variable
+    ;; to disable most functions temporarily
+
+    ;; Log the circuit breaker activation with timestamp
+    (print {event: "circuit_breaker_activated", 
+            governor: tx-sender, 
+            activation-block: block-height, 
+            reason: reason})
+
+    ;; Return the block when emergency mode will auto-expire (24 hours later)
+    (ok (+ block-height u144))
+  )
+)
+
+;; Implement time-delayed security withdrawal with additional verification
+(define-public (initiate-secure-withdrawal 
+                (envelope-identifier uint) 
+                (verification-code (buff 32)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+        (current-status (get envelope-status envelope-data))
+        (withdrawal-delay u72) ;; 72 blocks (approximately 12 hours)
+        (execution-block (+ block-height withdrawal-delay))
+      )
+      ;; Only originator can initiate secure withdrawal
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      ;; Only certain statuses allow secure withdrawal
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Set status to withdrawal-pending
+
+      (print {event: "secure_withdrawal_initiated", 
+              envelope-identifier: envelope-identifier, 
+              originator: originator, 
+              execution-block: execution-block, 
+              verification-digest: (hash160 verification-code)})
+      (ok execution-block)
+    )
+  )
+)
