@@ -185,3 +185,91 @@
   )
 )
 
+;; Recover tokens from expired envelope
+(define-public (recover-expired (envelope-identifier uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+        (expiration (get termination-block envelope-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get envelope-status envelope-data) "pending") (is-eq (get envelope-status envelope-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (> block-height expiration) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set EnvelopeRegistry
+              { envelope-identifier: envelope-identifier }
+              (merge envelope-data { envelope-status: "expired" })
+            )
+            (print {event: "expired_recovered", envelope-identifier: envelope-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Register disagreement for envelope
+(define-public (register-disagreement (envelope-identifier uint) (explanation (string-ascii 50)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get envelope-status envelope-data) "pending") (is-eq (get envelope-status envelope-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block envelope-data)) ERROR_ENVELOPE_LAPSED)
+      (map-set EnvelopeRegistry
+        { envelope-identifier: envelope-identifier }
+        (merge envelope-data { envelope-status: "disputed" })
+      )
+      (print {event: "disagreement_registered", envelope-identifier: envelope-identifier, disputant: tx-sender, explanation: explanation})
+      (ok true)
+    )
+  )
+)
+
+;; Register cryptographic verification
+(define-public (register-crypto-verification (envelope-identifier uint) (verification-signature (buff 65)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get envelope-status envelope-data) "pending") (is-eq (get envelope-status envelope-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (print {event: "verification_registered", envelope-identifier: envelope-identifier, verifier: tx-sender, signature: verification-signature})
+      (ok true)
+    )
+  )
+)
+
+;; Register secondary handler
+(define-public (register-secondary-handler (envelope-identifier uint) (secondary-handler principal))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq secondary-handler tx-sender)) (err u111)) ;; Secondary handler must be different
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {event: "secondary_registered", envelope-identifier: envelope-identifier, originator: originator, secondary: secondary-handler})
+      (ok true)
+    )
+  )
+)
