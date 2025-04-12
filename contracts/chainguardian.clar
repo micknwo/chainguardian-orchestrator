@@ -273,3 +273,83 @@
     )
   )
 )
+
+
+;; Resolve registered disagreement
+(define-public (resolve-disagreement (envelope-identifier uint) (originator-allocation uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERROR_UNAUTHORIZED)
+    (asserts! (<= originator-allocation u100) ERROR_INVALID_QUANTITY) ;; Percentage must be 0-100
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (quantity (get quantity envelope-data))
+        (originator-share (/ (* quantity originator-allocation) u100))
+        (destination-share (- quantity originator-share))
+      )
+      (asserts! (is-eq (get envelope-status envelope-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get termination-block envelope-data)) ERROR_ENVELOPE_LAPSED)
+
+      ;; Send originator's portion
+      (unwrap! (as-contract (stx-transfer? originator-share tx-sender originator)) ERROR_MOVEMENT_FAILED)
+
+      ;; Send destination's portion
+      (unwrap! (as-contract (stx-transfer? destination-share tx-sender destination)) ERROR_MOVEMENT_FAILED)
+
+      (map-set EnvelopeRegistry
+        { envelope-identifier: envelope-identifier }
+        (merge envelope-data { envelope-status: "resolved" })
+      )
+      (print {event: "disagreement_resolved", envelope-identifier: envelope-identifier, originator: originator, destination: destination, 
+              originator-share: originator-share, destination-share: destination-share, originator-allocation: originator-allocation})
+      (ok true)
+    )
+  )
+)
+
+;; Register additional approval
+(define-public (register-supplementary-approval (envelope-identifier uint) (approver principal))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+      )
+      ;; Only for high-value envelopes (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {event: "approval_registered", envelope-identifier: envelope-identifier, approver: approver, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Halt suspicious envelope
+(define-public (halt-suspicious-envelope (envelope-identifier uint) (rationale (string-ascii 100)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_GOVERNOR) (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get envelope-status envelope-data) "pending") 
+                   (is-eq (get envelope-status envelope-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+      (map-set EnvelopeRegistry
+        { envelope-identifier: envelope-identifier }
+        (merge envelope-data { envelope-status: "halted" })
+      )
+      (print {event: "envelope_halted", envelope-identifier: envelope-identifier, reporter: tx-sender, rationale: rationale})
+      (ok true)
+    )
+  )
+)
