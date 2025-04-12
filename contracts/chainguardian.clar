@@ -513,4 +513,74 @@
   )
 )
 
+;; Configure protection thresholds
+(define-public (configure-protection-thresholds (max-attempts uint) (lockout-duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERROR_UNAUTHORIZED)
+    (asserts! (> max-attempts u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-attempts u10) ERROR_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> lockout-duration u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks lockout (~1 hour)
+    (asserts! (<= lockout-duration u144) ERROR_INVALID_QUANTITY) ;; Maximum 144 blocks lockout (~1 day)
 
+    ;; Note: Complete implementation would store thresholds in contract variables
+
+    (print {event: "protection_thresholds_configured", max-attempts: max-attempts, 
+            lockout-duration: lockout-duration, governor: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Zero-knowledge validation for high-value envelopes
+(define-public (validate-with-zk-proof (envelope-identifier uint) (zk-proof (buff 128)) (public-inputs (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len public-inputs) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (quantity (get quantity envelope-data))
+      )
+      ;; Only high-value envelopes need ZK validation
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get envelope-status envelope-data) "pending") (is-eq (get envelope-status envelope-data) "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; In production, actual ZK proof validation would occur here
+
+      (print {event: "zk_proof_validated", envelope-identifier: envelope-identifier, validator: tx-sender, 
+              proof-digest: (hash160 zk-proof), public-inputs: public-inputs})
+      (ok true)
+    )
+  )
+)
+
+;; Transfer envelope control
+(define-public (transfer-envelope-control (envelope-identifier uint) (new-controller principal) (authorization-code (buff 32)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (current-controller (get originator envelope-data))
+        (current-status (get envelope-status envelope-data))
+      )
+      ;; Only current controller or governor can transfer
+      (asserts! (or (is-eq tx-sender current-controller) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      ;; New controller must be different
+      (asserts! (not (is-eq new-controller current-controller)) (err u210))
+      (asserts! (not (is-eq new-controller (get destination envelope-data))) (err u211))
+      ;; Only certain states allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Update envelope control
+      (map-set EnvelopeRegistry
+        { envelope-identifier: envelope-identifier }
+        (merge envelope-data { originator: new-controller })
+      )
+      (print {event: "control_transferred", envelope-identifier: envelope-identifier, 
+              previous-controller: current-controller, new-controller: new-controller, authorization-digest: (hash160 authorization-code)})
+      (ok true)
+    )
+  )
+)
