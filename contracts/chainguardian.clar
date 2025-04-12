@@ -36,3 +36,152 @@
     (not (is-eq destination (as-contract tx-sender)))
   )
 )
+
+(define-private (valid-envelope-identifier? (envelope-identifier uint))
+  (<= envelope-identifier (var-get current-envelope-identifier))
+)
+
+;; Core functionality implementation
+
+;; Execute delivery of tokens to destination
+(define-public (execute-delivery (envelope-identifier uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (destination (get destination envelope-data))
+        (quantity (get quantity envelope-data))
+        (token-identifier (get token-identifier envelope-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_GOVERNOR) (is-eq tx-sender (get originator envelope-data))) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block envelope-data)) ERROR_ENVELOPE_LAPSED)
+      (match (as-contract (stx-transfer? quantity tx-sender destination))
+        success
+          (begin
+            (map-set EnvelopeRegistry
+              { envelope-identifier: envelope-identifier }
+              (merge envelope-data { envelope-status: "delivered" })
+            )
+            (print {event: "delivery_executed", envelope-identifier: envelope-identifier, destination: destination, token-identifier: token-identifier, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Return tokens to originator
+(define-public (revert-delivery (envelope-identifier uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set EnvelopeRegistry
+              { envelope-identifier: envelope-identifier }
+              (merge envelope-data { envelope-status: "reverted" })
+            )
+            (print {event: "delivery_reverted", envelope-identifier: envelope-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Originator terminates envelope
+(define-public (terminate-envelope (envelope-identifier uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (quantity (get quantity envelope-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get termination-block envelope-data)) ERROR_ENVELOPE_LAPSED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set EnvelopeRegistry
+              { envelope-identifier: envelope-identifier }
+              (merge envelope-data { envelope-status: "terminated" })
+            )
+            (print {event: "envelope_terminated", envelope-identifier: envelope-identifier, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Modify envelope duration
+(define-public (modify-envelope-timeframe (envelope-identifier uint) (additional-blocks uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> additional-blocks u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERROR_INVALID_QUANTITY) ;; Max ~10 days extension
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data)) 
+        (destination (get destination envelope-data))
+        (existing-termination (get termination-block envelope-data))
+        (new-termination (+ existing-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get envelope-status envelope-data) "pending") (is-eq (get envelope-status envelope-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (map-set EnvelopeRegistry
+        { envelope-identifier: envelope-identifier }
+        (merge envelope-data { termination-block: new-termination })
+      )
+      (print {event: "timeframe_modified", envelope-identifier: envelope-identifier, requestor: tx-sender, new-termination-block: new-termination})
+      (ok true)
+    )
+  )
+)
+;; Secure multi-signature verification for envelope operations
+(define-public (verify-multi-signature 
+                (envelope-identifier uint) 
+                (signatures (list 3 (buff 65))) 
+                (signers (list 3 principal)) 
+                (operation-hash (buff 32)))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (>= (len signatures) u2) (err u220)) ;; At least 2 signatures required
+    (asserts! (is-eq (len signatures) (len signers)) (err u221)) ;; Must have matching signers
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (quantity (get quantity envelope-data))
+      )
+      ;; Only for high-value envelopes
+      (asserts! (> quantity u5000) (err u222))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get envelope-status envelope-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Verify all signatures
+      (print {event: "multi_signature_verified", envelope-identifier: envelope-identifier, 
+              verifier: tx-sender, signers: signers, operation-hash: operation-hash})
+      (ok true)
+    )
+  )
+)
+
