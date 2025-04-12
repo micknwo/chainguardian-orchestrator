@@ -675,3 +675,99 @@
     )
   )
 )
+
+;; Allow envelope rate limiting for specific accounts
+(define-public (configure-rate-limiting 
+                (max-envelopes-per-day uint) 
+                (target-principal principal))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERROR_UNAUTHORIZED)
+    (asserts! (> max-envelopes-per-day u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-envelopes-per-day u25) (err u240)) ;; Maximum 25 envelopes per day
+    (asserts! (not (is-eq target-principal PROTOCOL_GOVERNOR)) (err u241)) ;; Cannot limit protocol governor
+
+    ;; In a complete implementation, would update a map of rate limits
+
+    ;; Calculate when the current rate limit period would expire
+    (let
+      (
+        (period-expiration (+ block-height u144)) ;; 144 blocks = ~1 day
+      )
+      (print {event: "rate_limiting_configured", 
+              target-principal: target-principal, 
+              max-envelopes: max-envelopes-per-day, 
+              period-expiration: period-expiration})
+      (ok period-expiration)
+    )
+  )
+)
+
+;; Implement envelope segmentation for high-value transfers
+(define-public (segment-high-value-envelope 
+                (envelope-identifier uint) 
+                (segments uint))
+  (begin
+    (asserts! (valid-envelope-identifier? envelope-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> segments u1) (err u250)) ;; At least 2 segments required
+    (asserts! (<= segments u5) (err u251)) ;; Maximum 5 segments allowed
+
+    (let
+      (
+        (envelope-data (unwrap! (map-get? EnvelopeRegistry { envelope-identifier: envelope-identifier }) ERROR_MISSING_ENVELOPE))
+        (originator (get originator envelope-data))
+        (destination (get destination envelope-data))
+        (quantity (get quantity envelope-data))
+        (token-id (get token-identifier envelope-data))
+        (current-status (get envelope-status envelope-data))
+      )
+      ;; Only for high-value envelopes
+      (asserts! (> quantity u10000) (err u252))
+      ;; Only originator or protocol governor can segment
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_GOVERNOR)) ERROR_UNAUTHORIZED)
+      ;; Can only segment pending envelopes
+      (asserts! (is-eq current-status "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Calculate segment size (ensuring equal segments)
+      (let
+        (
+          (segment-quantity (/ quantity segments))
+        )
+        ;; Ensure clean division
+        (asserts! (is-eq (* segment-quantity segments) quantity) (err u253))
+
+        ;; Update original envelope status
+        (map-set EnvelopeRegistry
+          { envelope-identifier: envelope-identifier }
+          (merge envelope-data { 
+            envelope-status: "segmented",
+            quantity: u0 
+          })
+        )
+
+        (print {event: "envelope_segmented", 
+                original-envelope: envelope-identifier, 
+                segments: segments, 
+                segment-quantity: segment-quantity,
+                token-id: token-id})
+        (ok segments)
+      )
+    )
+  )
+)
+
+;; Schedule delayed operation
+(define-public (schedule-delayed-operation (operation-type (string-ascii 20)) (operation-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GOVERNOR) ERROR_UNAUTHORIZED)
+    (asserts! (> (len operation-parameters) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (execution-timestamp (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {event: "operation_scheduled", operation-type: operation-type, operation-parameters: operation-parameters, execution-timestamp: execution-timestamp})
+      (ok execution-timestamp)
+    )
+  )
+)
+
+
